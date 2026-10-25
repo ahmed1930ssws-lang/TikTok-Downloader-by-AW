@@ -29,8 +29,8 @@ jobs:
                   applicationId = "com.ttdl.app"
                   minSdk = 29
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -45,23 +45,24 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
               <application
                   android:label="تحميل تيك توك"
                   android:icon="@drawable/ic_download"
                   android:supportsRtl="true"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:theme="@style/Theme.TT">
 
-                  <activity android:name=".MainActivity" android:exported="true">
+                  <activity
+                      android:name=".SplashActivity"
+                      android:exported="true"
+                      android:theme="@style/Theme.Splash">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
+
+                  <activity android:name=".MainActivity" android:exported="false"/>
 
                   <activity
                       android:name=".ClipActivity"
@@ -72,11 +73,15 @@ jobs:
 
                   <service
                       android:name=".BubbleService"
-                      android:exported="false"
-                      android:foregroundServiceType="specialUse">
-                      <property
-                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                          android:value="floating_download_button"/>
+                      android:exported="true"
+                      android:label="تحميل تيك توك"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService"/>
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config"/>
                   </service>
               </application>
           </manifest>
@@ -85,107 +90,206 @@ jobs:
           cat > app/src/main/java/com/ttdl/app/BubbleService.kt <<'__EOF__'
           package com.ttdl.app
 
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.Service
+          import android.accessibilityservice.AccessibilityService
           import android.content.Intent
-          import android.content.pm.ServiceInfo
           import android.graphics.PixelFormat
-          import android.os.Build
-          import android.os.IBinder
+          import android.os.Handler
+          import android.os.Looper
           import android.view.Gravity
+          import android.view.HapticFeedbackConstants
           import android.view.MotionEvent
           import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
           import android.widget.ImageView
+          import android.widget.Toast
 
-          class BubbleService : Service() {
+          class BubbleService : AccessibilityService() {
+
+              companion object {
+                  var instance: BubbleService? = null
+                  val TIKTOK = setOf(
+                      "com.zhiliaoapp.musically",
+                      "com.ss.android.ugc.trill",
+                      "com.zhiliaoapp.musically.go"
+                  )
+                  val SHARE = listOf("share", "مشاركة")
+                  val COPY = listOf("copy link", "نسخ الرابط", "نسخ الارتباط", "copy")
+              }
 
               private lateinit var wm: WindowManager
+              private val ui = Handler(Looper.getMainLooper())
+              private val prefs by lazy { getSharedPreferences("tt", MODE_PRIVATE) }
               private var bubble: ImageView? = null
+              private var inTikTok = false
+              private var busy = false
 
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  startAsForeground()
-                  if (bubble == null) addBubble()
-                  return START_STICKY
-              }
-
-              private fun startAsForeground() {
-                  val nm = getSystemService(NotificationManager::class.java)
-                  nm.createNotificationChannel(
-                      NotificationChannel("bubble", "الأيقونة العائمة", NotificationManager.IMPORTANCE_MIN)
-                  )
-                  val n = Notification.Builder(this, "bubble")
-                      .setContentTitle("تحميل تيك توك يعمل")
-                      .setContentText("الأيقونة العائمة فعّالة")
-                      .setSmallIcon(R.drawable.ic_download)
-                      .build()
-                  if (Build.VERSION.SDK_INT >= 34) {
-                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-                  } else {
-                      startForeground(1, n)
-                  }
-              }
-
-              private fun addBubble() {
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  val size = (56 * resources.displayMetrics.density).toInt()
+              }
 
-                  val params = WindowManager.LayoutParams(
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {
+                  if (e == null || e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+                  val pkg = e.packageName?.toString() ?: return
+                  // نتجاهل نوافذ النظام ولوحة المفاتيح وتطبيقنا نفسه
+                  if (pkg == packageName || pkg == "com.android.systemui" ||
+                      pkg.contains("inputmethod") || pkg.contains("keyboard")) return
+                  inTikTok = pkg in TIKTOK
+                  refresh()
+              }
+
+              override fun onInterrupt() {}
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  hideBubble()
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              fun refresh() {
+                  val on = prefs.getBoolean("on", false)
+                  if (on && inTikTok) showBubble() else hideBubble()
+              }
+
+              // ---------- الأيقونة العائمة ----------
+
+              private fun showBubble() {
+                  if (bubble != null) return
+                  val dm = resources.displayMetrics
+                  val size = (58 * dm.density).toInt()
+
+                  val lp = WindowManager.LayoutParams(
                       size, size,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                       PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.START
-                      x = resources.displayMetrics.widthPixels - size - 16
-                      y = resources.displayMetrics.heightPixels / 2
+                      x = prefs.getInt("bx", dm.widthPixels - size - 16)
+                      y = prefs.getInt("by", dm.heightPixels / 2)
                   }
 
-                  val v = ImageView(this).apply { setImageResource(R.drawable.ic_download) }
+                  val v = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_download)
+                      alpha = 0.92f
+                  }
 
-                  var startX = 0; var startY = 0
-                  var touchX = 0f; var touchY = 0f
+                  var sx = 0; var sy = 0
+                  var tx = 0f; var ty = 0f
                   var moved = false
 
-                  v.setOnTouchListener { _, e ->
-                      when (e.action) {
+                  v.setOnTouchListener { view, ev ->
+                      when (ev.action) {
                           MotionEvent.ACTION_DOWN -> {
-                              startX = params.x; startY = params.y
-                              touchX = e.rawX; touchY = e.rawY; moved = false
+                              sx = lp.x; sy = lp.y; tx = ev.rawX; ty = ev.rawY; moved = false
                           }
                           MotionEvent.ACTION_MOVE -> {
-                              val dx = (e.rawX - touchX).toInt()
-                              val dy = (e.rawY - touchY).toInt()
-                              if (Math.abs(dx) + Math.abs(dy) > 12) moved = true
+                              val dx = (ev.rawX - tx).toInt()
+                              val dy = (ev.rawY - ty).toInt()
+                              if (Math.abs(dx) + Math.abs(dy) > 14) moved = true
                               if (moved) {
-                                  params.x = startX + dx
-                                  params.y = startY + dy
-                                  wm.updateViewLayout(v, params)
+                                  lp.x = sx + dx; lp.y = sy + dy
+                                  try { wm.updateViewLayout(view, lp) } catch (_: Exception) {}
                               }
                           }
-                          MotionEvent.ACTION_UP -> if (!moved) onBubbleTap()
+                          MotionEvent.ACTION_UP -> {
+                              if (moved) {
+                                  prefs.edit().putInt("bx", lp.x).putInt("by", lp.y).apply()
+                              } else {
+                                  view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                                  startDownload()
+                              }
+                          }
                       }
                       true
                   }
 
-                  wm.addView(v, params)
-                  bubble = v
+                  try { wm.addView(v, lp); bubble = v } catch (_: Exception) {}
               }
 
-              // قراءة الحافظة تحتاج نافذة عليها التركيز، لذلك نفتح شاشة شفافة لحظياً
-              private fun onBubbleTap() {
+              private fun hideBubble() {
+                  bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  bubble = null
+              }
+
+              private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+
+              // ---------- التحميل المباشر: مشاركة ← نسخ الرابط ← تحميل ----------
+
+              private fun startDownload() {
+                  if (busy) return
+                  busy = true
+                  val t0 = System.currentTimeMillis()
+                  toast("جاري تحضير الفيديو...")
+
+                  waitClick(SHARE, 4) { shared ->
+                      if (!shared) {
+                          fallback(t0)
+                          return@waitClick
+                      }
+                      ui.postDelayed({
+                          waitClick(COPY, 14) { copied ->
+                              if (copied) {
+                                  ui.postDelayed({ launchClip(t0, false) }, 600)
+                              } else {
+                                  performGlobalAction(GLOBAL_ACTION_BACK)
+                                  fallback(t0)
+                              }
+                          }
+                      }, 700)
+                  }
+              }
+
+              private fun fallback(t0: Long) {
+                  toast("تعذر النسخ التلقائي، سأجرب آخر رابط منسوخ")
+                  launchClip(t0, true)
+              }
+
+              private fun launchClip(t0: Long, allowOld: Boolean) {
+                  busy = false
                   startActivity(
-                      Intent(this, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      Intent(this, ClipActivity::class.java)
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          .putExtra("t0", t0)
+                          .putExtra("old", allowOld)
                   )
               }
 
-              override fun onDestroy() {
-                  bubble?.let { wm.removeView(it) }
-                  bubble = null
-                  super.onDestroy()
+              private fun waitClick(labels: List<String>, tries: Int, done: (Boolean) -> Unit) {
+                  var i = 0
+                  val r = object : Runnable {
+                      override fun run() {
+                          val node = findClickable(rootInActiveWindow, labels)
+                          if (node != null && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                              done(true); return
+                          }
+                          if (++i >= tries) { done(false); return }
+                          ui.postDelayed(this, 350)
+                      }
+                  }
+                  ui.post(r)
+              }
+
+              private fun findClickable(root: AccessibilityNodeInfo?, labels: List<String>): AccessibilityNodeInfo? {
+                  if (root == null) return null
+                  val q = ArrayDeque<AccessibilityNodeInfo>()
+                  q.add(root)
+                  var count = 0
+                  while (q.isNotEmpty() && count < 4000) {
+                      val n = q.removeFirst()
+                      count++
+                      val s = ((n.contentDescription?.toString() ?: "") + " " + (n.text?.toString() ?: "")).lowercase()
+                      if (s.isNotBlank() && labels.any { s.contains(it) }) {
+                          var c: AccessibilityNodeInfo? = n
+                          while (c != null && !c.isClickable) c = c.parent
+                          if (c != null) return c
+                      }
+                      for (i in 0 until n.childCount) n.getChild(i)?.let { q.add(it) }
+                  }
+                  return null
               }
           }
           __EOF__
@@ -197,6 +301,7 @@ jobs:
           import android.content.ClipboardManager
           import android.widget.Toast
 
+          // شاشة شفافة لحظية: أندرويد لا يسمح بقراءة الحافظة إلا لنافذة عليها التركيز
           class ClipActivity : Activity() {
               private var handled = false
 
@@ -205,16 +310,23 @@ jobs:
                   if (!hasFocus || handled) return
                   handled = true
 
+                  val t0 = intent.getLongExtra("t0", 0L)
+                  val allowOld = intent.getBooleanExtra("old", false)
+
                   val cm = getSystemService(ClipboardManager::class.java)
+                  val clipTime = cm.primaryClipDescription?.timestamp ?: 0L
                   val text = cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
                   val link = Regex("https?://\\S*tiktok\\.com\\S*").find(text)?.value
+                  val fresh = allowOld || clipTime >= t0 - 1500
 
-                  if (link == null) {
-                      Toast.makeText(
-                          this, "انسخ الرابط أولاً: مشاركة ← نسخ الرابط", Toast.LENGTH_LONG
-                      ).show()
-                  } else {
+                  if (link != null && fresh) {
                       Downloader.start(applicationContext, link)
+                  } else {
+                      Toast.makeText(
+                          this,
+                          "تعذر أخذ الرابط تلقائياً. انسخه يدوياً (مشاركة ← نسخ الرابط) ثم اضغط الأيقونة",
+                          Toast.LENGTH_LONG
+                      ).show()
                   }
                   finish()
                   overridePendingTransition(0, 0)
@@ -279,12 +391,12 @@ jobs:
           cat > app/src/main/java/com/ttdl/app/MainActivity.kt <<'__EOF__'
           package com.ttdl.app
 
-          import android.Manifest
           import android.app.Activity
+          import android.app.AlertDialog
           import android.content.Intent
           import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
           import android.net.Uri
-          import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
           import android.view.Gravity
@@ -296,63 +408,194 @@ jobs:
 
           class MainActivity : Activity() {
 
+              private lateinit var tvA11y: TextView
+              private lateinit var tvRun: TextView
+              private val prefs by lazy { getSharedPreferences("tt", MODE_PRIVATE) }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun shape(color: Int, radius: Int, stroke: Int = 0, strokeColor: Int = 0) =
+                  GradientDrawable().apply {
+                      setColor(color)
+                      cornerRadius = dp(radius).toFloat()
+                      if (stroke > 0) setStroke(dp(stroke), strokeColor)
+                  }
+
+              private fun text(t: String, size: Float, color: Int) = TextView(this).apply {
+                  text = t; textSize = size; setTextColor(color); gravity = Gravity.START
+              }
+
+              private fun button(t: String, bg: Int, fg: Int, stroke: Int = 0, onClick: () -> Unit) =
+                  Button(this).apply {
+                      text = t; textSize = 18f; setTextColor(fg); isAllCaps = false
+                      stateListAnimator = null
+                      background = shape(bg, 16, if (stroke != 0) 2 else 0, stroke)
+                      setOnClickListener { onClick() }
+                      layoutParams = LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+                          setMargins(dp(5), 0, dp(5), 0)
+                      }
+                  }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  val white = Color.WHITE
+                  val mute = Color.parseColor("#93A3AB")
+                  val teal = Color.parseColor("#2FD3C1")
 
                   val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
                       layoutDirection = View.LAYOUT_DIRECTION_RTL
-                      setPadding(56, 120, 56, 56)
-                      setBackgroundColor(Color.parseColor("#F2F5F3"))
+                      setPadding(dp(22), dp(56), dp(22), dp(22))
                   }
 
-                  root.addView(TextView(this).apply {
-                      text = "حمّل فيديو تيك توك\nبدون علامة مائية"
-                      textSize = 26f
-                      setTextColor(Color.parseColor("#12202B"))
-                      gravity = Gravity.START
-                  })
+                  root.addView(text("تحميل تيك توك", 30f, white).apply { setTypeface(typeface, android.graphics.Typeface.BOLD) })
+                  root.addView(text("بدون علامة مائية، بضغطة واحدة", 16f, teal).apply { setPadding(0, dp(4), 0, dp(24)) })
 
-                  root.addView(TextView(this).apply {
-                      text = "\n١. اضغط تشغيل وفعّل «العرض فوق التطبيقات».\n" +
-                          "٢. افتح تيك توك، ستجد أيقونة ⬇ عائمة.\n" +
-                          "٣. على الفيديو: مشاركة ← نسخ الرابط.\n" +
-                          "٤. اضغط الأيقونة العائمة فيبدأ التحميل.\n"
-                      textSize = 16f
-                      setTextColor(Color.parseColor("#5D6B74"))
-                      setLineSpacing(8f, 1f)
-                  })
+                  val card = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      background = shape(Color.parseColor("#1B2E3B"), 18)
+                      setPadding(dp(18), dp(16), dp(18), dp(16))
+                  }
+                  tvA11y = text("", 16f, white).apply { setPadding(0, 0, 0, dp(8)) }
+                  tvRun = text("", 16f, white)
+                  card.addView(tvA11y); card.addView(tvRun)
+                  root.addView(card)
 
-                  val start = Button(this).apply {
-                      text = "تشغيل"
-                      textSize = 20f
-                      setOnClickListener { startBubble() }
+                  val row = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(0, dp(22), 0, dp(22))
                   }
-                  val stop = Button(this).apply {
-                      text = "إيقاف"
-                      setOnClickListener {
-                          stopService(Intent(this@MainActivity, BubbleService::class.java))
-                      }
-                  }
-                  root.addView(start)
-                  root.addView(stop)
+                  row.addView(button("تشغيل", teal, Color.parseColor("#04201D")) { onStart() })
+                  row.addView(button("إيقاف", Color.TRANSPARENT, white, Color.parseColor("#3A4F5C")) { onStop() })
+                  root.addView(row)
+
+                  root.addView(text(
+                      "طريقة الاستخدام\n\n" +
+                      "١. اضغط تشغيل (مرة واحدة تفعّل خدمة الوصول).\n" +
+                      "٢. افتح تيك توك، ستظهر أيقونة ⬇ عائمة داخله فقط.\n" +
+                      "٣. وانت واقف على الفيديو اضغط الأيقونة، وسيُحمَّل تلقائياً.\n" +
+                      "٤. تجد الفيديو في Movies/TikTok.\n\n" +
+                      "استخدمه لفيديوهاتك أو بإذن أصحابها.",
+                      15f, mute
+                  ).apply { setLineSpacing(dp(4).toFloat(), 1f) })
+
                   setContentView(root)
-
-                  if (Build.VERSION.SDK_INT >= 33) {
-                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-                  }
               }
 
-              private fun startBubble() {
-                  if (!Settings.canDrawOverlays(this)) {
-                      Toast.makeText(this, "فعّل «العرض فوق التطبيقات» ثم ارجع واضغط تشغيل", Toast.LENGTH_LONG).show()
-                      startActivity(
-                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-                      )
-                      return
-                  }
-                  startForegroundService(Intent(this, BubbleService::class.java))
+              override fun onResume() {
+                  super.onResume()
+                  updateStatus()
+              }
+
+              private fun a11yEnabled(): Boolean {
+                  val s = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+                      ?: return false
+                  return s.split(':').any { it.startsWith("$packageName/") }
+              }
+
+              private fun updateStatus() {
+                  val a = a11yEnabled()
+                  val on = a && prefs.getBoolean("on", false)
+                  tvA11y.text = if (a) "✔  خدمة الوصول مفعّلة" else "✖  خدمة الوصول غير مفعّلة"
+                  tvA11y.setTextColor(Color.parseColor(if (a) "#2FD3C1" else "#FF6B81"))
+                  tvRun.text = if (on) "✔  الأيقونة العائمة تعمل داخل تيك توك" else "●  الأيقونة العائمة متوقفة"
+                  tvRun.setTextColor(Color.parseColor(if (on) "#2FD3C1" else "#93A3AB"))
+              }
+
+              private fun onStart() {
+                  if (!a11yEnabled()) { showHelp(); return }
+                  prefs.edit().putBoolean("on", true).apply()
+                  BubbleService.instance?.refresh()
+                  updateStatus()
                   Toast.makeText(this, "تم التشغيل. افتح تيك توك الآن", Toast.LENGTH_LONG).show()
+              }
+
+              private fun onStop() {
+                  prefs.edit().putBoolean("on", false).apply()
+                  BubbleService.instance?.refresh()
+                  updateStatus()
+                  Toast.makeText(this, "تم الإيقاف", Toast.LENGTH_SHORT).show()
+              }
+
+              private fun showHelp() {
+                  AlertDialog.Builder(this)
+                      .setTitle("تفعيل خدمة الوصول")
+                      .setMessage(
+                          "الأيقونة العائمة تحتاج تفعيل خدمة الوصول مرة واحدة:\n\n" +
+                          "١. اضغط «فتح الإعدادات» ← التطبيقات المثبتة ← تحميل تيك توك ← فعّلها.\n\n" +
+                          "لو الزر رمادي ولا يمكن تفعيله:\n" +
+                          "اضغط «معلومات التطبيق» ← قائمة ⋮ ← «السماح بالإعدادات المقيّدة»، ثم ارجع وفعّل الخدمة."
+                      )
+                      .setPositiveButton("فتح الإعدادات") { _, _ ->
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                      .setNeutralButton("معلومات التطبيق") { _, _ ->
+                          startActivity(
+                              Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                          )
+                      }
+                      .setNegativeButton("إلغاء", null)
+                      .show()
+              }
+          }
+          __EOF__
+          mkdir -p app/src/main/java/com/ttdl/app
+          cat > app/src/main/java/com/ttdl/app/SplashActivity.kt <<'__EOF__'
+          package com.ttdl.app
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.Gravity
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class SplashActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val d = resources.displayMetrics.density
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setBackgroundColor(Color.parseColor("#12202B"))
+                  }
+                  val logo = ImageView(this).apply {
+                      setImageResource(R.drawable.ic_download)
+                      layoutParams = LinearLayout.LayoutParams((120 * d).toInt(), (120 * d).toInt())
+                      scaleX = 0.6f; scaleY = 0.6f; alpha = 0f
+                  }
+                  val title = TextView(this).apply {
+                      text = "تحميل تيك توك"
+                      textSize = 26f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setPadding(0, (20 * d).toInt(), 0, 0)
+                      alpha = 0f
+                  }
+                  val sub = TextView(this).apply {
+                      text = "بدون علامة مائية"
+                      textSize = 15f
+                      setTextColor(Color.parseColor("#2FD3C1"))
+                      gravity = Gravity.CENTER
+                      alpha = 0f
+                  }
+                  root.addView(logo); root.addView(title); root.addView(sub)
+                  setContentView(root)
+
+                  logo.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(700).start()
+                  title.animate().alpha(1f).setStartDelay(400).setDuration(600).start()
+                  sub.animate().alpha(1f).setStartDelay(700).setDuration(600).start()
+
+                  Handler(Looper.getMainLooper()).postDelayed({
+                      startActivity(Intent(this, MainActivity::class.java))
+                      finish()
+                      overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
+                  }, 1700)
               }
           }
           __EOF__
@@ -368,6 +611,47 @@ jobs:
               <path android:fillColor="#12202B"
                   android:pathData="M7,18h10v2h-10z"/>
           </vector>
+          __EOF__
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/colors.xml <<'__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="bg">#12202B</color>
+          </resources>
+          __EOF__
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="a11y_desc">تظهر الأيقونة العائمة داخل تيك توك فقط، وتنسخ رابط الفيديو الحالي ثم تحمله بدون علامة مائية. لا يتم جمع أو إرسال أي بيانات شخصية.</string>
+          </resources>
+          __EOF__
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/styles.xml <<'__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.TT" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@color/bg</item>
+                  <item name="android:statusBarColor">@color/bg</item>
+                  <item name="android:navigationBarColor">@color/bg</item>
+              </style>
+              <style name="Theme.Splash" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@color/bg</item>
+                  <item name="android:statusBarColor">@color/bg</item>
+                  <item name="android:navigationBarColor">@color/bg</item>
+              </style>
+          </resources>
+          __EOF__
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/accessibility_config.xml <<'__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="true"
+              android:notificationTimeout="100"
+              android:description="@string/a11y_desc"/>
           __EOF__
           cat > build.gradle.kts <<'__EOF__'
           plugins {
@@ -396,4 +680,3 @@ jobs:
         with:
           name: TikTok-Downloader-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          
